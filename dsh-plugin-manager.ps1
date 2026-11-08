@@ -391,6 +391,23 @@ function Handle-Update($arg) {
 
 # ============ 卸载 ============
 
+function Get-PathSize($path) {
+    # 坑：对「文件」路径用 Get-ChildItem -Recurse，PowerShell 会递归枚举它的父目录。
+    # 在 ~/.dsh 下父目录含整个 node_modules，实测一个 886 字节的文件要跑 27 秒。
+    # 所以必须区分文件与目录。
+    try {
+        $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+    }
+    catch { return [int64]0 }
+
+    if (-not $item.PSIsContainer) { return [int64]$item.Length }
+
+    $sum = (Get-ChildItem -LiteralPath $path -Recurse -File -Force -ErrorAction SilentlyContinue |
+            Measure-Object -Property Length -Sum).Sum
+    if ($sum) { return [int64]$sum }
+    return [int64]0
+}
+
 function Get-PluginDataPaths($name) {
     $dshHome = Join-Path $env:USERPROFILE ".dsh"
     $base = $name.Split('/')[-1]
@@ -418,9 +435,7 @@ function Remove-PluginData($name) {
     Write-Host ""
     Warn "该插件在 ~/.dsh 下还有数据："
     foreach ($p in $paths) {
-        $sum = (Get-ChildItem $p -Recurse -File -Force -ErrorAction SilentlyContinue |
-                Measure-Object -Property Length -Sum).Sum
-        if (-not $sum) { $sum = 0 }
+        $sum = Get-PathSize $p
         Dim ("{0}  ({1:N1} MB)" -f $p.Replace($env:USERPROFILE, '~'), ($sum / 1MB))
     }
     Dim "删除后重装会回到初始状态；保留则配置仍在。"
@@ -569,11 +584,7 @@ function Show-PluginDetail($index) {
     $dataPaths = Get-PluginDataPaths $p.Name
     if ($dataPaths.Count -gt 0) {
         $total = 0
-        foreach ($d in $dataPaths) {
-            $s = (Get-ChildItem $d -Recurse -File -Force -ErrorAction SilentlyContinue |
-                  Measure-Object -Property Length -Sum).Sum
-            if ($s) { $total += $s }
-        }
+        foreach ($d in $dataPaths) { $total += (Get-PathSize $d) }
         $shown = @($dataPaths | ForEach-Object { $_.Replace($env:USERPROFILE, '~') })
         Write-Host "  数据  " -NoNewline
         Write-Host (($shown -join " ; ") + ("  ({0:N1} MB)" -f ($total / 1MB)))
