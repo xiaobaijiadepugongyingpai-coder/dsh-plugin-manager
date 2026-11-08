@@ -1,0 +1,6 @@
+# 临时与备份
+_install-backup-*/
+_uninstall-trash-*/
+_*.ps1
+*.log
+*.tmp
