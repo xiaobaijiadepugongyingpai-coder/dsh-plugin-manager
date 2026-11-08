@@ -269,6 +269,7 @@ function Install-One($npmName, $version) {
     Add-ToBundles $npmName
     Repair-Electron
     Ok "安装完成，重启 DSH 生效。"
+    Dim "插件列表已变化，输入 ls 刷新仪表盘。"
 }
 
 function Do-SearchInstall($keyword) {
@@ -459,6 +460,7 @@ function Remove-One($index, $skipConfirm) {
     Remove-PluginData $p.Name
     Repair-Electron
     Ok "卸载完成。"
+    Dim "插件列表已变化，输入 ls 刷新仪表盘。"
 }
 
 function Handle-Remove($arg) {
@@ -526,9 +528,9 @@ function Select-Plugin($index) {
     Write-Host "  [1] 更新   [2] 卸载   [3] 详情   [b] 返回" -ForegroundColor DarkGray
     $sel = Read-Host "  选择"
     switch ($sel.Trim()) {
-        "1" { Update-One $index; [void](Read-Host "  回车继续") }
-        "2" { Remove-One $index $false; [void](Read-Host "  回车继续") }
-        "3" { Show-PluginInfo $index; [void](Read-Host "  回车继续") }
+        "1" { Update-One $index }
+        "2" { Remove-One $index $false }
+        "3" { Show-PluginInfo $index }
         default { return }
     }
 }
@@ -557,8 +559,9 @@ function Show-Help {
 
 if (-not (Test-Path $PkgPath)) { Err "找不到 profile：$ProfileDir"; exit 1 }
 
+Show-Dashboard
+
 while ($true) {
-    Show-Dashboard
     $line = Read-Host "  >"
     if ([string]::IsNullOrWhiteSpace($line)) { continue }
     $line = $line.Trim()
@@ -568,30 +571,30 @@ while ($true) {
     if ($parts.Count -gt 1) { $arg = $parts[1].Trim() }
 
     switch ($cmd) {
-        "help" { Show-Help; [void](Read-Host "  回车继续") }
-        "?"    { Show-Help; [void](Read-Host "  回车继续") }
-        "h"    { Show-Help; [void](Read-Host "  回车继续") }
+        "help" { Show-Help }
+        "?"    { Show-Help }
+        "h"    { Show-Help }
 
-        "ls"   { continue }
-        "list" { continue }
+        "ls"   { Show-Dashboard }
+        "list" { Show-Dashboard }
 
-        "check"   { [void](Invoke-CheckUpdates); [void](Read-Host "  回车继续") }
-        "refresh" { [void](Update-Catalog $CacheDir $true); [void](Read-Host "  回车继续") }
+        "check"   { [void](Invoke-CheckUpdates) }
+        "refresh" { [void](Update-Catalog $CacheDir $true) }
 
-        "i"       { Do-SearchInstall $arg; [void](Read-Host "  回车继续") }
-        "install" { Do-SearchInstall $arg; [void](Read-Host "  回车继续") }
-        "add"     { Do-SearchInstall $arg; [void](Read-Host "  回车继续") }
+        "i"       { Do-SearchInstall $arg }
+        "install" { Do-SearchInstall $arg }
+        "add"     { Do-SearchInstall $arg }
 
-        "u"      { Handle-Update $arg; [void](Read-Host "  回车继续") }
-        "update" { Handle-Update $arg; [void](Read-Host "  回车继续") }
-        "up"     { Handle-Update $arg; [void](Read-Host "  回车继续") }
+        "u"      { Handle-Update $arg }
+        "update" { Handle-Update $arg }
+        "up"     { Handle-Update $arg }
 
-        "rm"        { Handle-Remove $arg; [void](Read-Host "  回车继续") }
-        "remove"    { Handle-Remove $arg; [void](Read-Host "  回车继续") }
-        "uninstall" { Handle-Remove $arg; [void](Read-Host "  回车继续") }
+        "rm"        { Handle-Remove $arg }
+        "remove"    { Handle-Remove $arg }
+        "uninstall" { Handle-Remove $arg }
 
         "info" {
-            if ($arg -match '^\d+$') { Show-PluginInfo ([int]$arg); [void](Read-Host "  回车继续") }
+            if ($arg -match '^\d+$') { Show-PluginInfo ([int]$arg) }
             else { Err "用法：info <序号>" }
         }
 
@@ -601,10 +604,7 @@ while ($true) {
 
         default {
             if ($cmd -match '^\d+$') { Select-Plugin ([int]$cmd) }
-            else {
-                Err "未知命令：$cmd（输入 help 查看）"
-                Start-Sleep -Milliseconds 800
-            }
+            else { Err "未知命令：$cmd（输入 help 查看）" }
         }
     }
 }
