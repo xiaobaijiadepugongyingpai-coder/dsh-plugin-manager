@@ -23,13 +23,19 @@ function Get-CatalogAgeDays($metaPath) {
     catch { return -1 }
 }
 
+function Write-JsonNoBom($path, $obj) {
+    # PS 5.1 的 Set-Content -Encoding UTF8 会写 BOM，换读取方式就炸。统一走这里。
+    $text = $obj | ConvertTo-Json -Depth 5
+    [System.IO.File]::WriteAllText($path, $text, (New-Object System.Text.UTF8Encoding($false)))
+}
+
 function Build-CatalogIndex($cacheDir, $rawPath) {
     $p = Get-CatalogPaths $cacheDir
     $builder = Join-Path $PSScriptRoot "build-index.js"
     $count = & node $builder $rawPath $p.Index 2>&1
     if ($LASTEXITCODE -ne 0) { return -1 }
     $meta = @{ at = (Get-Date).ToString("o"); count = [int]$count; url = $script:CatalogUrl; format = $script:IndexFormat }
-    $meta | ConvertTo-Json | Set-Content $p.Meta -Encoding UTF8
+    Write-JsonNoBom $p.Meta $meta
     return [int]$count
 }
 

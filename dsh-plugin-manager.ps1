@@ -46,11 +46,27 @@ function Test-DshClosed {
         Warn "请在托盘退出 DSH，并在任务管理器确认没有 DeepSeek Harness 进程。"
         return $false
     }
+
+    # 兜底：进程名可能改名或装了便携版，直接测 node_modules 是否可写
+    $nm = Join-Path $ProfileDir "node_modules"
+    if (Test-Path $nm) {
+        $probe = Join-Path $nm (".dsh-write-probe-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
+        try {
+            [System.IO.File]::WriteAllText($probe, "x")
+            Remove-Item $probe -Force -ErrorAction SilentlyContinue
+        }
+        catch {
+            Write-Host ""
+            Err "node_modules 不可写，可能有进程仍占用着它。"
+            Warn "请确认 DSH 已完全退出后重试。"
+            return $false
+        }
+    }
     return $true
 }
 
 function Backup-Profile {
-    $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+    $stamp = Get-Date -Format "yyyyMMdd-HHmmssfff"
     $dir = Join-Path $ProfileDir "_install-backup-$stamp"
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
     foreach ($f in @("package.json", "pnpm-lock.yaml", "cordis.patch.yml")) {
@@ -142,7 +158,13 @@ function Get-OutdatedCache {
 function Set-OutdatedCache($list) {
     New-Item -ItemType Directory -Force -Path $CacheDir | Out-Null
     $obj = @{ at = (Get-Date).ToString("o"); items = @($list) }
-    $obj | ConvertTo-Json -Depth 5 | Set-Content $OutdatedFile -Encoding UTF8
+    Write-JsonNoBom $OutdatedFile $obj
+}
+
+function Clear-OutdatedCache {
+    # 安装/更新/卸载后调用：让下次绘制仪表盘或启动时重新检查，
+    # 否则会继续显示 6 小时前的旧数据，与实际情况不符。
+    Remove-Item $OutdatedFile -Force -ErrorAction SilentlyContinue
 }
 
 function Compare-Semver($a, $b) {
@@ -186,9 +208,15 @@ function Invoke-CheckUpdates {
     Dim "检查中（$total 个插件，约 10-20 秒）："
     Write-Host "  " -NoNewline
     $out = @()
+    $failed = 0
     foreach ($p in $installed) {
         $latest = Get-LatestVersion $p.Name
-        if ($latest -and (Compare-Semver $latest $p.Version) -gt 0) {
+        if ($null -eq $latest) {
+            $failed++
+            Write-Host "?" -NoNewline -ForegroundColor Red
+            continue
+        }
+        if ((Compare-Semver $latest $p.Version) -gt 0) {
             $out += [pscustomobject]@{ name = $p.Name; current = $p.Version; latest = $latest }
             Write-Host "." -NoNewline -ForegroundColor Green
         }
@@ -198,7 +226,10 @@ function Invoke-CheckUpdates {
     }
     Write-Host ""
     Set-OutdatedCache $out
-    if ($out.Count -eq 0) { Ok "所有插件都是最新版。" } else { Ok "发现 $($out.Count) 个可更新。" }
+    if ($failed -gt 0) {
+        Warn "$failed 个插件查询失败（网络问题），结果可能不完整。"
+    }
+    if ($out.Count -eq 0) { Ok "已检查的插件都是最新版。" } else { Ok "发现 $($out.Count) 个可更新。" }
     return $out
 }
 
@@ -268,71 +299,75 @@ function Install-One($npmName, $version) {
     if ($code -ne 0) { Err "安装失败（exit=$code），package.json 已回滚。"; return }
     Add-ToBundles $npmName
     Repair-Electron
+    Clear-OutdatedCache
     Ok "安装完成，重启 DSH 生效。"
     Dim "插件列表已变化，输入 ls 刷新仪表盘。"
 }
 
 function Do-SearchInstall($keyword) {
-    if ([string]::IsNullOrWhiteSpace($keyword)) {
-        $keyword = Read-Host "  输入关键词（如 sidebar / pet / theme）"
-    }
-    if ([string]::IsNullOrWhiteSpace($keyword)) { return }
+    # 用循环而不是递归：连按 k 换关键词时不会层层叠加栈帧
+    while ($true) {
+        if ([string]::IsNullOrWhiteSpace($keyword)) {
+            $keyword = Read-Host "  输入关键词（如 sidebar / pet / theme）"
+        }
+        if ([string]::IsNullOrWhiteSpace($keyword)) { return }
 
-    # 容错：用户可能照着文档写了 <关键词> 或加了引号，去掉这些符号
-    $keyword = ($keyword -replace '[<>"'']', '').Trim()
-    if ($keyword -eq "") { Err "关键词为空"; return }
+        # 容错：用户可能照着文档写了 <关键词> 或加了引号，去掉这些符号
+        $keyword = ($keyword -replace '[<>"'']', '').Trim()
+        if ($keyword -eq "") { Err "关键词为空"; return }
 
-    $ok = Update-Catalog $CacheDir $false
-    if (-not $ok) { return }
+        $ok = Update-Catalog $CacheDir $false
+        if (-not $ok) { return }
 
-    $lines = Get-CatalogLines $CacheDir
-    $meta = Get-CatalogMeta $CacheDir
-    $results = Search-Catalog $lines $keyword 20
+        $lines = Get-CatalogLines $CacheDir
+        $meta = Get-CatalogMeta $CacheDir
+        $results = Search-Catalog $lines $keyword 20
 
-    if ($results.Count -eq 0) {
-        Warn "没有匹配「$keyword」的可安装插件。"
-        Dim "提示：部分插件只在 GitHub 发布，无法通过 npm 安装。"
+        if ($results.Count -eq 0) {
+            Warn "没有匹配「$keyword」的可安装插件。"
+            Dim "提示：部分插件只在 GitHub 发布，无法通过 npm 安装。"
+            return
+        }
+
+        $installedNames = @(Get-Installed | ForEach-Object { $_.Name })
+        $metaDate = "未知"
+        if ($meta -and $meta.at) { $metaDate = $meta.at.Substring(0, 10) }
+        $metaCount = 0
+        if ($meta) { $metaCount = $meta.count }
+
+        Write-Host ""
+        Write-Host ("  找到 {0} 个结果（目录 {1} · 共 {2} 个可安装）" -f $results.Count, $metaDate, $metaCount) -ForegroundColor DarkGray
+        Write-Host ""
+        for ($i = 0; $i -lt $results.Count; $i++) {
+            $r = $results[$i]
+            Write-Host ("  [{0,2}] {1,-40} {2,-10}" -f ($i + 1), $r.Npm, $r.Ver) -NoNewline
+            if ($installedNames -contains $r.Npm) { Write-Host "  ★已装" -ForegroundColor Green } else { Write-Host "" }
+            if ($r.Desc) { Write-Host ("       " + $r.Desc) -ForegroundColor DarkGray }
+            if ($r.Url) { Write-Host ("       " + $r.Url) -ForegroundColor DarkCyan }
+        }
+        Write-Host ""
+
+        $sel = Read-Host "  输入序号安装（回车取消，k 换关键词）"
+        if ([string]::IsNullOrWhiteSpace($sel)) { return }
+        if ($sel -eq "k" -or $sel -eq "K") {
+            $keyword = Read-Host "  新关键词"
+            continue
+        }
+
+        $idx = 0
+        if (-not [int]::TryParse($sel.Trim(), [ref]$idx)) { Err "无效序号"; return }
+        if ($idx -lt 1 -or $idx -gt $results.Count) { Err "序号超出范围"; return }
+
+        $pick = $results[$idx - 1]
+        Write-Host ""
+        Write-Host "  将安装：" -NoNewline
+        Write-Host $pick.Npm -ForegroundColor White
+        if ($pick.Desc) { Dim $pick.Desc }
+        $ans = Read-Host "  确认？(y/N)"
+        if ($ans -ne "y" -and $ans -ne "Y") { Dim "已取消"; return }
+        Install-One $pick.Npm $null
         return
     }
-
-    $installedNames = @(Get-Installed | ForEach-Object { $_.Name })
-    $metaDate = "未知"
-    if ($meta -and $meta.at) { $metaDate = $meta.at.Substring(0, 10) }
-    $metaCount = 0
-    if ($meta) { $metaCount = $meta.count }
-
-    Write-Host ""
-    Write-Host ("  找到 {0} 个结果（目录 {1} · 共 {2} 个可安装）" -f $results.Count, $metaDate, $metaCount) -ForegroundColor DarkGray
-    Write-Host ""
-    for ($i = 0; $i -lt $results.Count; $i++) {
-        $r = $results[$i]
-        Write-Host ("  [{0,2}] {1,-40} {2,-10}" -f ($i + 1), $r.Npm, $r.Ver) -NoNewline
-        if ($installedNames -contains $r.Npm) { Write-Host "  ★已装" -ForegroundColor Green } else { Write-Host "" }
-        if ($r.Desc) { Write-Host ("       " + $r.Desc) -ForegroundColor DarkGray }
-        if ($r.Url) { Write-Host ("       " + $r.Url) -ForegroundColor DarkCyan }
-    }
-    Write-Host ""
-
-    $sel = Read-Host "  输入序号安装（回车取消，k 换关键词）"
-    if ([string]::IsNullOrWhiteSpace($sel)) { return }
-    if ($sel -eq "k" -or $sel -eq "K") {
-        $kw2 = Read-Host "  新关键词"
-        Do-SearchInstall $kw2
-        return
-    }
-
-    $idx = 0
-    if (-not [int]::TryParse($sel.Trim(), [ref]$idx)) { Err "无效序号"; return }
-    if ($idx -lt 1 -or $idx -gt $results.Count) { Err "序号超出范围"; return }
-
-    $pick = $results[$idx - 1]
-    Write-Host ""
-    Write-Host "  将安装：" -NoNewline
-    Write-Host $pick.Npm -ForegroundColor White
-    if ($pick.Desc) { Dim $pick.Desc }
-    $ans = Read-Host "  确认？(y/N)"
-    if ($ans -ne "y" -and $ans -ne "Y") { Dim "已取消"; return }
-    Install-One $pick.Npm $null
 }
 
 # ============ 更新 ============
@@ -351,6 +386,7 @@ function Update-One($index) {
     $code = Invoke-Pnpm @("add", "$($p.Name)@$latest", "--save-exact")
     if ($code -ne 0) { Err "更新失败（exit=$code）"; return }
     Repair-Electron
+    Clear-OutdatedCache
     Ok "更新完成。"
 }
 
@@ -416,13 +452,16 @@ function Get-PluginDataPaths($name) {
     $paths = @()
     if ($protected -notcontains $base) {
         $p = Join-Path $dshHome $base
-        if (Test-Path $p) { $paths += $p }
+        if (Test-Path $p) { $paths += [pscustomobject]@{ Path = $p; Reason = "与包名末段同名" } }
     }
     $extra = @{ 'dsh-pet' = @('pet.json', 'pets') }
     if ($extra.ContainsKey($base)) {
         foreach ($x in $extra[$base]) {
             $p = Join-Path $dshHome $x
-            if ((Test-Path $p) -and ($paths -notcontains $p)) { $paths += $p }
+            $exists = @($paths | Where-Object { $_.Path -eq $p }).Count -gt 0
+            if ((Test-Path $p) -and (-not $exists)) {
+                $paths += [pscustomobject]@{ Path = $p; Reason = "已知映射（dsh-pet 专用）" }
+            }
         }
     }
     return $paths
@@ -435,8 +474,8 @@ function Remove-PluginData($name) {
     Write-Host ""
     Warn "该插件在 ~/.dsh 下还有数据："
     foreach ($p in $paths) {
-        $sum = Get-PathSize $p
-        Dim ("{0}  ({1:N1} MB)" -f $p.Replace($env:USERPROFILE, '~'), ($sum / 1MB))
+        $sum = Get-PathSize $p.Path
+        Dim ("{0}  ({1:N1} MB)  ← {2}" -f $p.Path.Replace($env:USERPROFILE, '~'), ($sum / 1MB), $p.Reason)
     }
     Dim "删除后重装会回到初始状态；保留则配置仍在。"
     Dim "安全措施：只移动到 ~/.dsh/_uninstall-trash-时间戳\，可随时取回。"
@@ -447,12 +486,12 @@ function Remove-PluginData($name) {
     $confirm = Read-Host "  请输入"
     if ($confirm -ne $name) { Warn "输入不匹配，已跳过（数据保留）。"; return }
 
-    $trash = Join-Path (Join-Path $env:USERPROFILE ".dsh") ("_uninstall-trash-" + (Get-Date -Format "yyyyMMdd-HHmmss"))
+    $trash = Join-Path (Join-Path $env:USERPROFILE ".dsh") ("_uninstall-trash-" + (Get-Date -Format "yyyyMMdd-HHmmssfff"))
     New-Item -ItemType Directory -Force -Path $trash | Out-Null
     foreach ($p in $paths) {
-        $leaf = Split-Path $p -Leaf
+        $leaf = Split-Path $p.Path -Leaf
         try {
-            Move-Item -LiteralPath $p -Destination (Join-Path $trash $leaf) -Force -ErrorAction Stop
+            Move-Item -LiteralPath $p.Path -Destination (Join-Path $trash $leaf) -Force -ErrorAction Stop
             Step "已移入回收目录：$leaf"
         }
         catch { Err "移动失败：$leaf" }
@@ -536,7 +575,7 @@ function Remove-PluginConfig($name, $ids) {
         return
     }
 
-    $bak = "$patchPath.bak-" + (Get-Date -Format "yyyyMMdd-HHmmss")
+    $bak = "$patchPath.bak-" + (Get-Date -Format "yyyyMMdd-HHmmssfff")
     Copy-Item $patchPath $bak -Force
     $text = ($newLines -join "`r`n") + "`r`n"
     [System.IO.File]::WriteAllText($patchPath, $text, (New-Object System.Text.UTF8Encoding($false)))
@@ -577,6 +616,7 @@ function Remove-One($index, $skipConfirm) {
     Remove-PluginData $p.Name
     Remove-PluginConfig $p.Name $patchIds
     Repair-Electron
+    Clear-OutdatedCache
     Ok "卸载完成。"
     Dim "插件列表已变化，输入 ls 刷新仪表盘。"
 }
@@ -655,8 +695,7 @@ function Get-DshExe {
 function Save-DshExe($path) {
     New-Item -ItemType Directory -Force -Path $CacheDir | Out-Null
     $cfgFile = Join-Path $CacheDir "config.json"
-    $obj = @{ dshExe = $path }
-    ($obj | ConvertTo-Json) | Set-Content $cfgFile -Encoding UTF8
+    Write-JsonNoBom $cfgFile @{ dshExe = $path }
 }
 
 function Start-Dsh {
@@ -700,7 +739,10 @@ function Resolve-PluginIndex($token) {
 
     $partial = @()
     for ($i = 0; $i -lt $installed.Count; $i++) {
-        if ($installed[$i].Name -like "*$token*") { $partial += ($i + 1) }
+        # 用 IndexOf 而非 -like：用户输入里的 * ? 会被当通配符，可能误匹配到别的插件
+        if ($installed[$i].Name.IndexOf($token, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            $partial += ($i + 1)
+        }
     }
     if ($partial.Count -eq 1) { return $partial[0] }
     if ($partial.Count -gt 1) {
@@ -753,8 +795,8 @@ function Show-PluginDetail($index) {
     $dataPaths = Get-PluginDataPaths $p.Name
     if ($dataPaths.Count -gt 0) {
         $total = 0
-        foreach ($d in $dataPaths) { $total += (Get-PathSize $d) }
-        $shown = @($dataPaths | ForEach-Object { $_.Replace($env:USERPROFILE, '~') })
+        foreach ($d in $dataPaths) { $total += (Get-PathSize $d.Path) }
+        $shown = @($dataPaths | ForEach-Object { $_.Path.Replace($env:USERPROFILE, '~') })
         Write-Host "  数据  " -NoNewline
         Write-Host (($shown -join " ; ") + ("  ({0:N1} MB)" -f ($total / 1MB)))
     }
@@ -772,8 +814,12 @@ function Show-PluginDetail($index) {
         "2" { Remove-One $index $false }
         "3" {
             if ($repo) {
-                Start-Process $repo
-                Dim "已在浏览器打开：$repo"
+                # 仓库地址来自插件 package.json，恶意插件可能写任意协议，只放行 http(s)
+                if ($repo -match '^https?://') {
+                    Start-Process $repo
+                    Dim "已在浏览器打开：$repo"
+                }
+                else { Warn "仓库地址格式异常，已跳过：$repo" }
             }
             else { Warn "该插件未声明仓库地址" }
         }
