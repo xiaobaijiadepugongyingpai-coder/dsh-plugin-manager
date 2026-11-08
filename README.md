@@ -174,7 +174,7 @@ dsh-usage  dsh-agents  task-board  bin  cache  node_modules
 | 系统 | Windows 10 / 11 |
 | PowerShell | 5.1（系统自带） |
 | Node.js | 任意 LTS（DSH 本身已带） |
-| pnpm | 随 DSH 安装，通常在 `~/.dsh/profiles/desktop` 的 PATH 中 |
+| pnpm | 需在 PATH 中，缺失时执行 `npm install -g pnpm` |
 | DSH | 0.2.x（profile 结构为 `dependencies` + `dsh.profile.bundles`） |
 
 在 DSH Desktop `0.2.2-rc.1` + Windows 11 + PowerShell 5.1 上测试。

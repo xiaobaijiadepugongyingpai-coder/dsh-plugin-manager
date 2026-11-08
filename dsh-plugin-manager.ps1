@@ -809,6 +809,18 @@ if (-not (Test-Path $PkgPath)) { Err "找不到 profile：$ProfileDir"; exit 1 }
 
 Show-Dashboard
 
+# 前置检查：缺依赖时只提示，不阻断（查看类功能仍可用）
+if (-not (Get-Command pnpm -ErrorAction SilentlyContinue)) {
+    Write-Host ""
+    Err "未找到 pnpm —— 安装/更新/卸载会失败。"
+    Dim "安装方法：npm install -g pnpm"
+}
+if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
+    Write-Host ""
+    Err "未找到 node —— 插件目录索引无法生成。"
+    Dim "安装方法：https://nodejs.org/ 下载 LTS 版"
+}
+
 # 启动时自动检查更新；6 小时内检查过则跳过，避免每次开都等 20 秒
 $needCheck = $true
 $cached = Get-OutdatedCache
