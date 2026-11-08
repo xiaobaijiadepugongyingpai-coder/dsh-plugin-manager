@@ -3,11 +3,12 @@
 
 $script:CatalogUrl     = "https://awesome-dsh-plugin.com/plugins.json"
 $script:CatalogTtlDays = 7
+$script:IndexFormat    = 2   # 2 = 增加 url 列；格式变化时自动重建索引
 
 function Get-CatalogPaths($cacheDir) {
     return @{
         Raw   = Join-Path $cacheDir "catalog.json"
-        Index = Join-Path $cacheDir "catalog-index.tsv"
+        Index = Join-Path $cacheDir "catalog-index-v$($script:IndexFormat).tsv"
         Meta  = Join-Path $cacheDir "catalog.meta"
     }
 }
@@ -22,6 +23,16 @@ function Get-CatalogAgeDays($metaPath) {
     catch { return -1 }
 }
 
+function Build-CatalogIndex($cacheDir, $rawPath) {
+    $p = Get-CatalogPaths $cacheDir
+    $builder = Join-Path $PSScriptRoot "build-index.js"
+    $count = & node $builder $rawPath $p.Index 2>&1
+    if ($LASTEXITCODE -ne 0) { return -1 }
+    $meta = @{ at = (Get-Date).ToString("o"); count = [int]$count; url = $script:CatalogUrl; format = $script:IndexFormat }
+    $meta | ConvertTo-Json | Set-Content $p.Meta -Encoding UTF8
+    return [int]$count
+}
+
 function Update-Catalog($cacheDir, $force) {
     $p = Get-CatalogPaths $cacheDir
     New-Item -ItemType Directory -Force -Path $cacheDir | Out-Null
@@ -29,6 +40,16 @@ function Update-Catalog($cacheDir, $force) {
     $age = Get-CatalogAgeDays $p.Meta
     if (-not $force -and $age -ge 0 -and $age -lt $script:CatalogTtlDays -and (Test-Path $p.Index)) {
         return $true
+    }
+
+    # 索引缺失但原始数据还在（例如索引格式升级）→ 本地重建，不必重新下载
+    if (-not $force -and (Test-Path $p.Raw)) {
+        Write-Host "  正在重建索引..." -ForegroundColor DarkGray
+        $n = Build-CatalogIndex $cacheDir $p.Raw
+        if ($n -ge 0) {
+            Write-Host "  索引已重建：$n 个可安装插件" -ForegroundColor Green
+            return $true
+        }
     }
 
     Write-Host ""
@@ -54,19 +75,14 @@ function Update-Catalog($cacheDir, $force) {
     }
 
     Write-Host "  正在建立索引..." -ForegroundColor DarkGray
-    $builder = Join-Path $PSScriptRoot "build-index.js"
-    $count = & node $builder $tmp $p.Index 2>&1
-
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "  索引建立失败：$count" -ForegroundColor Red
+    $count = Build-CatalogIndex $cacheDir $tmp
+    if ($count -lt 0) {
+        Write-Host "  索引建立失败，请确认已安装 Node.js" -ForegroundColor Red
         Remove-Item $tmp -Force -ErrorAction SilentlyContinue
         return $false
     }
 
     Move-Item $tmp $p.Raw -Force
-    $meta = @{ at = (Get-Date).ToString("o"); count = [int]$count; url = $script:CatalogUrl }
-    $meta | ConvertTo-Json | Set-Content $p.Meta -Encoding UTF8
-
     Write-Host "  目录已更新：$count 个可安装插件" -ForegroundColor Green
     return $true
 }
@@ -112,6 +128,7 @@ function Search-Catalog($lines, $keyword, $limit) {
             Name  = $f[2]
             Cat   = $f[3]
             Desc  = $f[4]
+            Url   = $(if ($f.Count -gt 6) { $f[6] } else { "" })
         })
     }
 

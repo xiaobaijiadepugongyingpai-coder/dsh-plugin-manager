@@ -309,6 +309,7 @@ function Do-SearchInstall($keyword) {
         Write-Host ("  [{0,2}] {1,-40} {2,-10}" -f ($i + 1), $r.Npm, $r.Ver) -NoNewline
         if ($installedNames -contains $r.Npm) { Write-Host "  ★已装" -ForegroundColor Green } else { Write-Host "" }
         if ($r.Desc) { Write-Host ("       " + $r.Desc) -ForegroundColor DarkGray }
+        if ($r.Url) { Write-Host ("       " + $r.Url) -ForegroundColor DarkCyan }
     }
     Write-Host ""
 
@@ -379,12 +380,13 @@ function Update-All {
 
 function Handle-Update($arg) {
     if ([string]::IsNullOrWhiteSpace($arg)) {
-        Err "用法：u <序号> 或 u all"
+        Err "用法：u 序号 / u 包名 / u all"
         return
     }
     if ($arg.ToLower() -eq "all") { Update-All; return }
-    if ($arg -match '^\d+$') { Update-One ([int]$arg); return }
-    Err "参数无效：$arg（应为序号或 all）"
+    $idx = Resolve-PluginIndex $arg
+    if ($idx -gt 0) { Update-One $idx; return }
+    if ($idx -eq -1) { Err "未找到插件：$arg" }
 }
 
 # ============ 卸载 ============
@@ -469,15 +471,18 @@ function Remove-One($index, $skipConfirm) {
 
 function Handle-Remove($arg) {
     if ([string]::IsNullOrWhiteSpace($arg)) {
-        Err "用法：rm <序号,...>  例如 rm 3,5"
+        Err "用法：rm 3,5  或  rm 包名1,包名2"
         return
     }
     $idxList = @()
     foreach ($x in $arg.Split(',')) {
         $t = $x.Trim()
-        if ($t -match '^\d+$') { $idxList += [int]$t }
+        if ($t -eq "") { continue }
+        $r = Resolve-PluginIndex $t
+        if ($r -gt 0) { $idxList += $r }
+        elseif ($r -eq -1) { Warn "未找到：$t" }
     }
-    if ($idxList.Count -eq 0) { Err "参数无效：$arg"; return }
+    if ($idxList.Count -eq 0) { Err "没有可卸载的插件"; return }
 
     $installed = Get-Installed
     $names = @()
@@ -494,47 +499,104 @@ function Handle-Remove($arg) {
     foreach ($i in $idxList) { Remove-One $i $true }
 }
 
-# ============ 详情 / 单插件菜单 ============
+# ============ 详情 + 操作（合并） ============
 
-function Show-PluginInfo($index) {
+function Resolve-PluginIndex($token) {
+    # 返回 1..N 表示找到；0 表示匹配到多个；-1 表示没找到
+    $installed = Get-Installed
+    if ($token -match '^\d+$') {
+        $n = [int]$token
+        if ($n -ge 1 -and $n -le $installed.Count) { return $n }
+        return -1
+    }
+
+    for ($i = 0; $i -lt $installed.Count; $i++) {
+        if ($installed[$i].Name -eq $token) { return ($i + 1) }
+    }
+
+    $partial = @()
+    for ($i = 0; $i -lt $installed.Count; $i++) {
+        if ($installed[$i].Name -like "*$token*") { $partial += ($i + 1) }
+    }
+    if ($partial.Count -eq 1) { return $partial[0] }
+    if ($partial.Count -gt 1) {
+        Warn "「$token」匹配到多个插件："
+        foreach ($n in $partial) { Dim ("[{0}] {1}" -f $n, $installed[$n - 1].Name) }
+        Dim "请用序号或完整包名指定。"
+        return 0
+    }
+    return -1
+}
+
+function Show-PluginDetail($index) {
     $installed = Get-Installed
     if ($index -lt 1 -or $index -gt $installed.Count) { Err "序号超出范围"; return }
     $p = $installed[$index - 1]
     $dir = Join-Path $ProfileDir "node_modules\$($p.Name)"
 
-    Write-Host ""
-    Write-Host "  $($p.Name)" -ForegroundColor White
-    Write-Host ("  " + ("-" * 62)) -ForegroundColor DarkGray
-    Write-Host "  版本    " -NoNewline; Write-Host $p.Version
-    Write-Host "  状态    " -NoNewline
-    if ($p.Enabled) { Write-Host "启用" -ForegroundColor Green } else { Write-Host "未启用" -ForegroundColor DarkGray }
-
+    $desc = ""
+    $repo = ""
     $pj = Join-Path $dir "package.json"
     if (Test-Path $pj) {
         try {
-            $meta = Get-Content $pj -Raw -Encoding UTF8 | ConvertFrom-Json
-            if ($meta.description) { Write-Host "  描述    " -NoNewline; Write-Host $meta.description }
-            if ($meta.repository -and $meta.repository.url) { Write-Host "  仓库    " -NoNewline; Write-Host $meta.repository.url }
+            $m = Get-Content $pj -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($m.description) { $desc = $m.description }
+            if ($m.repository -and $m.repository.url) {
+                # npm 里的仓库地址常写成 git+https://xxx.git，浏览器打不开，转成普通 https
+                $repo = $m.repository.url
+                $repo = $repo -replace '^git\+', ''
+                $repo = $repo -replace '^git://', 'https://'
+                $repo = $repo -replace '\.git$', ''
+            }
         } catch {}
     }
+
+    $latest = ""
+    $cache = Get-OutdatedCache
+    if ($cache) {
+        foreach ($i in $cache.items) { if ($i.name -eq $p.Name) { $latest = $i.latest } }
+    }
+
+    Write-Host ""
+    Write-Host "  $($p.Name)" -ForegroundColor White -NoNewline
+    Write-Host ("  " + $p.Version) -ForegroundColor Gray -NoNewline
+    if ($p.Enabled) { Write-Host "  启用" -ForegroundColor Green } else { Write-Host "  未启用" -ForegroundColor DarkGray }
+    Write-Host ("  " + ("-" * 66)) -ForegroundColor DarkGray
+
+    if ($desc) { Write-Host "  描述  " -NoNewline; Write-Host $desc }
+    if ($repo) { Write-Host "  仓库  " -NoNewline; Write-Host $repo -ForegroundColor Cyan }
+
     $dataPaths = Get-PluginDataPaths $p.Name
-    if ($dataPaths.Count -gt 0) { Write-Host "  数据    " -NoNewline; Write-Host ($dataPaths -join " ; ") }
-    Write-Host ""
-}
+    if ($dataPaths.Count -gt 0) {
+        $total = 0
+        foreach ($d in $dataPaths) {
+            $s = (Get-ChildItem $d -Recurse -File -Force -ErrorAction SilentlyContinue |
+                  Measure-Object -Property Length -Sum).Sum
+            if ($s) { $total += $s }
+        }
+        $shown = @($dataPaths | ForEach-Object { $_.Replace($env:USERPROFILE, '~') })
+        Write-Host "  数据  " -NoNewline
+        Write-Host (($shown -join " ; ") + ("  ({0:N1} MB)" -f ($total / 1MB)))
+    }
 
-function Select-Plugin($index) {
-    $installed = Get-Installed
-    if ($index -lt 1 -or $index -gt $installed.Count) { Err "序号超出范围"; return }
-    $p = $installed[$index - 1]
+    if ($latest) {
+        Write-Host "  最新  " -NoNewline
+        Write-Host ("$latest  可更新") -ForegroundColor Yellow
+    }
 
     Write-Host ""
-    Write-Host ("  已选中：{0}  {1}" -f $p.Name, $p.Version) -ForegroundColor White
-    Write-Host "  [1] 更新   [2] 卸载   [3] 详情   [b] 返回" -ForegroundColor DarkGray
+    Write-Host "  [1] 更新   [2] 卸载   [3] 打开仓库   [b] 返回" -ForegroundColor DarkGray
     $sel = Read-Host "  选择"
     switch ($sel.Trim()) {
         "1" { Update-One $index }
         "2" { Remove-One $index $false }
-        "3" { Show-PluginInfo $index }
+        "3" {
+            if ($repo) {
+                Start-Process $repo
+                Dim "已在浏览器打开：$repo"
+            }
+            else { Warn "该插件未声明仓库地址" }
+        }
         default { return }
     }
 }
@@ -546,14 +608,14 @@ function Show-Help {
     Write-Host "  命令（参数直接跟在后面，不要加尖括号）" -ForegroundColor White
     Write-Host ("  " + ("-" * 62)) -ForegroundColor DarkGray
     Write-Host "  i 关键词       搜索并安装，例如：i sidebar"
-    Write-Host "  u 序号         更新指定插件，例如：u 3"
+    Write-Host "  3              查看第 3 个插件（详情 + 操作菜单）"
+    Write-Host "  dsh-pet        也可以直接输包名查看"
+    Write-Host "  u 3            更新第 3 个插件（同样支持包名）"
     Write-Host "  u all          更新全部"
     Write-Host "  rm 3,5         批量卸载"
-    Write-Host "  info 2         查看插件详情"
-    Write-Host "  check          检查可更新插件（联网约 20 秒）"
     Write-Host "  refresh        刷新插件目录缓存（约 60 秒）"
+    Write-Host "  check          立即检查更新（启动时会自动检查，通常不需要）"
     Write-Host "  ls             重绘仪表盘"
-    Write-Host "  2              选中第 2 个插件，弹出操作菜单"
     Write-Host "  q              退出"
     Write-Host ""
     Dim "插件目录缓存 7 天，过期会自动提示刷新。"
@@ -565,6 +627,21 @@ function Show-Help {
 if (-not (Test-Path $PkgPath)) { Err "找不到 profile：$ProfileDir"; exit 1 }
 
 Show-Dashboard
+
+# 启动时自动检查更新；6 小时内检查过则跳过，避免每次开都等 20 秒
+$needCheck = $true
+$cached = Get-OutdatedCache
+if ($cached) {
+    try {
+        $needCheck = (((Get-Date) - [datetime]::Parse($cached.at)).TotalHours -gt 6)
+    }
+    catch { $needCheck = $true }
+}
+if ($needCheck) {
+    Write-Host "  正在检查插件更新（约 10-20 秒，6 小时内只检查一次）..." -ForegroundColor DarkGray
+    [void](Invoke-CheckUpdates)
+    Show-Dashboard
+}
 
 while ($true) {
     $line = Read-Host "  >"
@@ -601,8 +678,8 @@ while ($true) {
         "uninstall" { Handle-Remove $arg }
 
         "info" {
-            if ($arg -match '^\d+$') { Show-PluginInfo ([int]$arg) }
-            else { Err "用法：info <序号>" }
+            if ($arg -match '^\d+$') { Show-PluginDetail ([int]$arg) }
+            else { Err "用法：info 序号（也可以直接输序号）" }
         }
 
         "q"    { Clear-Host; return }
@@ -610,12 +687,15 @@ while ($true) {
         "exit" { Clear-Host; return }
 
         default {
-            if ($cmd -match '^\d+$') { Select-Plugin ([int]$cmd) }
-            elseif ($cmd -match '[<>]') {
-                Err "未知命令：$cmd"
-                Dim "尖括号只是文档里的占位写法，实际输入不要写。例如：i sidebar"
+            $idx = Resolve-PluginIndex $cmd
+            if ($idx -gt 0) { Show-PluginDetail $idx }
+            elseif ($idx -eq -1) {
+                if ($cmd -match '[<>]') {
+                    Err "未知命令：$cmd"
+                    Dim "尖括号只是文档里的占位写法，实际输入不要写。例如：i sidebar"
+                }
+                else { Err "未知命令或插件：$cmd（输入 help 查看）" }
             }
-            else { Err "未知命令：$cmd（输入 help 查看）" }
         }
     }
 }
