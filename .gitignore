@@ -4,3 +4,4 @@ _uninstall-trash-*/
 _*.ps1
 *.log
 *.tmp
+.cache/
