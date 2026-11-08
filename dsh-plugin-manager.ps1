@@ -75,7 +75,7 @@ function Repair-Electron {
         Warn "electron 二进制缺失，正在用国内镜像修复（约 19 秒）..."
         Push-Location $e
         try { & node install.js | Out-Null } finally { Pop-Location }
-        if (Test-Path $exe) { Ok "electron 已修复" } else { Err "electron 修复失败，请参考教程第六节" }
+        if (Test-Path $exe) { Ok "electron 已修复" } else { Err "electron 修复失败，请参考教程「electron 二进制被清空时」一节" }
     }
 }
 
