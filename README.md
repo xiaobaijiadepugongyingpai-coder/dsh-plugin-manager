@@ -97,6 +97,9 @@ powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.dsh\tools\dsh-plugin
 | `<数字>` | 选中插件，弹出「更新 / 卸载 / 详情」菜单 | — |
 | `help` / `q` | 帮助 / 退出 | — |
 
+> 表中尖括号 `<...>` 表示占位，**实际输入时不要写**。例如搜插件直接输 `i sidebar`，不是 `i <sidebar>`。
+
+
 **所有写操作都会先检查 DSH 是否完全退出**，没退干净直接拒绝，不会留下半成品。
 
 ---

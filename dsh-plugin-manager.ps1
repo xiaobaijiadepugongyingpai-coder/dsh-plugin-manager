@@ -278,6 +278,10 @@ function Do-SearchInstall($keyword) {
     }
     if ([string]::IsNullOrWhiteSpace($keyword)) { return }
 
+    # 容错：用户可能照着文档写了 <关键词> 或加了引号，去掉这些符号
+    $keyword = ($keyword -replace '[<>"'']', '').Trim()
+    if ($keyword -eq "") { Err "关键词为空"; return }
+
     $ok = Update-Catalog $CacheDir $false
     if (-not $ok) { return }
 
@@ -539,17 +543,18 @@ function Select-Plugin($index) {
 
 function Show-Help {
     Write-Host ""
-    Write-Host "  命令" -ForegroundColor White
+    Write-Host "  命令（参数直接跟在后面，不要加尖括号）" -ForegroundColor White
     Write-Host ("  " + ("-" * 62)) -ForegroundColor DarkGray
-    Write-Host "  i <关键词>      搜索插件目录并安装"
-    Write-Host "  u <序号>        更新指定插件      u all  更新全部"
-    Write-Host "  rm <序号,...>   卸载，例如 rm 3,5"
-    Write-Host "  info <序号>     查看插件详情"
-    Write-Host "  check           检查可更新插件（联网约 20 秒）"
-    Write-Host "  refresh         刷新插件目录缓存（约 60 秒）"
-    Write-Host "  ls              重绘仪表盘"
-    Write-Host "  <数字>          选中该插件，弹出操作菜单"
-    Write-Host "  q               退出"
+    Write-Host "  i 关键词       搜索并安装，例如：i sidebar"
+    Write-Host "  u 序号         更新指定插件，例如：u 3"
+    Write-Host "  u all          更新全部"
+    Write-Host "  rm 3,5         批量卸载"
+    Write-Host "  info 2         查看插件详情"
+    Write-Host "  check          检查可更新插件（联网约 20 秒）"
+    Write-Host "  refresh        刷新插件目录缓存（约 60 秒）"
+    Write-Host "  ls             重绘仪表盘"
+    Write-Host "  2              选中第 2 个插件，弹出操作菜单"
+    Write-Host "  q              退出"
     Write-Host ""
     Dim "插件目录缓存 7 天，过期会自动提示刷新。"
     Write-Host ""
@@ -565,6 +570,8 @@ while ($true) {
     $line = Read-Host "  >"
     if ([string]::IsNullOrWhiteSpace($line)) { continue }
     $line = $line.Trim()
+    # 容错：i<关键词> 这种照抄文档的写法，自动拆成 "i 关键词"
+    $line = $line -replace '^([a-zA-Z]+)<', '$1 <'
     $parts = @($line -split '\s+', 2)
     $cmd = $parts[0].ToLower()
     $arg = ""
@@ -604,6 +611,10 @@ while ($true) {
 
         default {
             if ($cmd -match '^\d+$') { Select-Plugin ([int]$cmd) }
+            elseif ($cmd -match '[<>]') {
+                Err "未知命令：$cmd"
+                Dim "尖括号只是文档里的占位写法，实际输入不要写。例如：i sidebar"
+            }
             else { Err "未知命令：$cmd（输入 help 查看）" }
         }
     }
