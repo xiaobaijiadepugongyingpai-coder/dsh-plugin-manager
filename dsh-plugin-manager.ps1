@@ -460,6 +460,99 @@ function Remove-PluginData($name) {
     Ok "数据已移到 $trash"
 }
 
+function Get-PluginPatchIds($name) {
+    # 插件自己的 cordis.patch.yml 声明了它会插入哪些条目 id。
+    # 必须在 pnpm remove 之前读取——删掉包之后就查不到了。
+    $p = Join-Path $ProfileDir "node_modules\$name\cordis.patch.yml"
+    if (-not (Test-Path $p)) { return @() }
+    $ids = @()
+    foreach ($line in (Get-Content $p -Encoding UTF8)) {
+        if ($line -match '^\s*-\s*id:\s*(.+)$') {
+            $ids += $matches[1].Trim().Trim("'").Trim('"')
+        }
+    }
+    return @($ids | Select-Object -Unique)
+}
+
+function Get-TopLevelPatchIds($lines) {
+    $out = @()
+    foreach ($l in $lines) {
+        if ($l -match '^- id:\s*(.+)$') {
+            $out += $matches[1].Trim().Trim("'").Trim('"')
+        }
+    }
+    return $out
+}
+
+function Remove-PluginConfig($name, $ids) {
+    if ($ids.Count -eq 0) { Dim "未找到该插件的配置条目声明，跳过配置清理。"; return }
+
+    $patchPath = Join-Path $ProfileDir "cordis.patch.yml"
+    if (-not (Test-Path $patchPath)) { return }
+
+    $lines = @(Get-Content $patchPath -Encoding UTF8)
+    $starts = @()
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match '^- id:\s*(.+)$') {
+            $starts += [pscustomobject]@{ Line = $i; Id = $matches[1].Trim().Trim("'").Trim('"') }
+        }
+    }
+
+    $targets = @()
+    for ($k = 0; $k -lt $starts.Count; $k++) {
+        if ($ids -contains $starts[$k].Id) {
+            $end = $lines.Count - 1
+            if ($k + 1 -lt $starts.Count) { $end = $starts[$k + 1].Line - 1 }
+            $targets += [pscustomobject]@{ Id = $starts[$k].Id; Start = $starts[$k].Line; End = $end }
+        }
+    }
+    if ($targets.Count -eq 0) { Dim "配置文件里没有该插件的条目（可能从未配置过）。"; return }
+
+    Write-Host ""
+    Warn "该插件在 cordis.patch.yml 里还有 $($targets.Count) 条配置："
+    foreach ($t in $targets) {
+        Dim ("  - id: {0}   （第 {1}-{2} 行，共 {3} 行）" -f $t.Id, ($t.Start + 1), ($t.End + 1), ($t.End - $t.Start + 1))
+    }
+    Dim "只删除这些条目，其它插件的配置不会动。"
+    $ans = Read-Host "  删除这些配置？(y/N)"
+    if ($ans -ne "y" -and $ans -ne "Y") { Dim "已保留配置。"; return }
+
+    # 按整块剔除
+    $drop = @{}
+    foreach ($t in $targets) {
+        for ($i = $t.Start; $i -le $t.End; $i++) { $drop[$i] = $true }
+    }
+    $newLines = @()
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if (-not $drop.ContainsKey($i)) { $newLines += $lines[$i] }
+    }
+
+    # 删除前校验：除目标外，其它条目必须一条不少
+    $before = @(Get-TopLevelPatchIds $lines)
+    $expected = @($before | Where-Object { $ids -notcontains $_ })
+    $got = @(Get-TopLevelPatchIds $newLines)
+    if ((($got | Sort-Object) -join "|") -ne (($expected | Sort-Object) -join "|")) {
+        Err "预校验失败：删除后条目与预期不符，已放弃修改。"
+        return
+    }
+
+    $bak = "$patchPath.bak-" + (Get-Date -Format "yyyyMMdd-HHmmss")
+    Copy-Item $patchPath $bak -Force
+    $text = ($newLines -join "`r`n") + "`r`n"
+    [System.IO.File]::WriteAllText($patchPath, $text, (New-Object System.Text.UTF8Encoding($false)))
+
+    # 写入后再校验一次，不对就回滚
+    $after = @(Get-TopLevelPatchIds (Get-Content $patchPath -Encoding UTF8))
+    if ((($after | Sort-Object) -join "|") -ne (($expected | Sort-Object) -join "|")) {
+        Copy-Item $bak $patchPath -Force
+        Err "写入后校验失败，已从备份回滚。"
+        return
+    }
+
+    Ok "已删除 $($targets.Count) 条配置（备份：$(Split-Path $bak -Leaf)）"
+    Dim "剩余 $($after.Count) 条，其它插件配置完好。"
+}
+
 function Remove-One($index, $skipConfirm) {
     $installed = Get-Installed
     if ($index -lt 1 -or $index -gt $installed.Count) { Err "序号超出范围"; return }
@@ -474,11 +567,15 @@ function Remove-One($index, $skipConfirm) {
     if (-not (Test-DshClosed)) { return }
     [void](Backup-Profile)
 
+    # 必须在删除包之前读取：插件目录里的 cordis.patch.yml 声明了它的配置条目
+    $patchIds = Get-PluginPatchIds $p.Name
+
     Step "卸载 $($p.Name)"
     $code = Invoke-Pnpm @("remove", $p.Name)
     if ($code -ne 0) { Err "卸载失败（exit=$code）"; return }
     Remove-FromBundles $p.Name
     Remove-PluginData $p.Name
+    Remove-PluginConfig $p.Name $patchIds
     Repair-Electron
     Ok "卸载完成。"
     Dim "插件列表已变化，输入 ls 刷新仪表盘。"
@@ -512,6 +609,78 @@ function Handle-Remove($arg) {
     if ($ans -ne "y" -and $ans -ne "Y") { return }
 
     foreach ($i in $idxList) { Remove-One $i $true }
+}
+
+# ============ 启动 DSH ============
+
+function Get-DshExe {
+    # 1. 用户手动指定过
+    $cfgFile = Join-Path $CacheDir "config.json"
+    if (Test-Path $cfgFile) {
+        try {
+            $cfg = Get-Content $cfgFile -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($cfg.dshExe -and (Test-Path $cfg.dshExe)) { return $cfg.dshExe }
+        }
+        catch {}
+    }
+
+    # 2. 注册表卸载项（最可靠，跨机器通用）
+    $keys = @(
+        "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
+    )
+    foreach ($k in $keys) {
+        $items = Get-ItemProperty $k -ErrorAction SilentlyContinue |
+                 Where-Object { $_.DisplayName -match "^DeepSeek Harness" }
+        foreach ($it in $items) {
+            if ($it.DisplayIcon) {
+                $exe = ($it.DisplayIcon -split ",")[0].Trim()
+                if (Test-Path $exe) { return $exe }
+            }
+            if ($it.InstallLocation) {
+                $exe = Join-Path $it.InstallLocation "DeepSeek Harness.exe"
+                if (Test-Path $exe) { return $exe }
+            }
+        }
+    }
+
+    # 3. 正在运行的进程
+    $proc = Get-Process -Name "DeepSeek Harness" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($proc -and $proc.Path) { return $proc.Path }
+
+    return $null
+}
+
+function Save-DshExe($path) {
+    New-Item -ItemType Directory -Force -Path $CacheDir | Out-Null
+    $cfgFile = Join-Path $CacheDir "config.json"
+    $obj = @{ dshExe = $path }
+    ($obj | ConvertTo-Json) | Set-Content $cfgFile -Encoding UTF8
+}
+
+function Start-Dsh {
+    $running = Get-Process -Name "DeepSeek Harness" -ErrorAction SilentlyContinue
+    if ($running) { Warn "DSH 已经在运行（$($running.Count) 个进程）。"; return }
+
+    $exe = Get-DshExe
+    if (-not $exe) {
+        Warn "没找到 DSH 的安装位置。"
+        $typed = Read-Host "  请输入 DeepSeek Harness.exe 的完整路径（回车取消）"
+        if ([string]::IsNullOrWhiteSpace($typed)) { return }
+        $typed = $typed.Trim().Trim('"')
+        if (-not (Test-Path $typed)) { Err "路径不存在：$typed"; return }
+        Save-DshExe $typed
+        $exe = $typed
+        Dim "已记住该路径，下次自动使用。"
+    }
+
+    try {
+        Start-Process -FilePath $exe -WorkingDirectory (Split-Path $exe -Parent)
+        Ok "已启动：$exe"
+        Dim "启动需要几秒，插件加载完成后即可使用。"
+    }
+    catch { Err "启动失败：$($_.Exception.Message)" }
 }
 
 # ============ 详情 + 操作（合并） ============
@@ -624,6 +793,7 @@ function Show-Help {
     Write-Host "  u 3            更新第 3 个插件（同样支持包名）"
     Write-Host "  u all          更新全部"
     Write-Host "  rm 3,5         批量卸载"
+    Write-Host "  start          启动 DSH（自动定位安装路径）"
     Write-Host "  refresh        刷新插件目录缓存（约 60 秒）"
     Write-Host "  check          立即检查更新（启动时会自动检查，通常不需要）"
     Write-Host "  ls             重绘仪表盘"
@@ -675,6 +845,8 @@ while ($true) {
 
         "check"   { [void](Invoke-CheckUpdates) }
         "refresh" { [void](Update-Catalog $CacheDir $true) }
+        "start"   { Start-Dsh }
+        "run"     { Start-Dsh }
 
         "i"       { Do-SearchInstall $arg }
         "install" { Do-SearchInstall $arg }
