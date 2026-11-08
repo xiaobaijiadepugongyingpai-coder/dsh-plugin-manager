@@ -5,12 +5,20 @@
     启动即显示仪表盘，下方输入命令操作。
     支持从插件市场目录（awesome-dsh-plugin.com）搜索并安装。
     所有写操作要求 DSH 已完全退出，并自动备份配置。
+
+    用法:
+        .\dsh-plugin-manager.ps1               # 默认操作 desktop profile
+        .\dsh-plugin-manager.ps1 -Profile web  # 操作其它 profile
 #>
+
+param(
+    [string]$Profile = "desktop"
+)
 
 $ErrorActionPreference = "Stop"
 
 $ToolsDir     = $PSScriptRoot
-$ProfileDir   = Join-Path $env:USERPROFILE ".dsh\profiles\desktop"
+$ProfileDir   = Join-Path $env:USERPROFILE ".dsh\profiles\$Profile"
 $PkgPath      = Join-Path $ProfileDir "package.json"
 $CacheDir     = Join-Path $ToolsDir ".cache"
 $OutdatedFile = Join-Path $CacheDir "outdated.json"
