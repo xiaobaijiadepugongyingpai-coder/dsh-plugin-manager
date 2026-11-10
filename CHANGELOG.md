@@ -2,10 +2,13 @@
 
 ## v2.4 — 2026-11-10
 
+新增功能：
+- **搜索新插件展示收藏数与下载量**：从插件目录提取 `stars`（GitHub Stars 收藏数）与 `downloads`（近 30 天下载量），索引格式升级为 v3（支持无感本地自动重建）。搜索结果列表与插件详情界面直观展示热度指标（如 `★ 10.3k  ↓ 1.0M`）。
+
 修复：
-- **插件全量更新不可用**：原 `u all` 使用 `pnpm up --latest` 递归更新所有包，导致耗时数分钟并触发 supply-chain `ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION` 或依赖冲突；现改为精确筛选并针对待更新插件执行批量/逐项精确版本更新（`pnpm add <pkg>@<latest> --save-exact`），耗时从几分钟缩减至数秒且不破坏其它锁版本
-- **`start` 启动 DSH 后关闭命令窗口导致 DSH 一并退出**：原通过 `Start-Process` 作为控制台子进程启动，关闭控制台窗口时控制台进程树广播关闭信号终止 DSH；现改用 Windows Explorer COM（`Shell.Application.ShellExecute`）托管启动，彻底脱离控制台进程生命周期
-- 备份目录增加 `pnpm-workspace.yaml`，防止 pnpm 策略配置丢失
+- **彻底解决 `start` 启动 DSH 后关闭命令窗口导致 DSH 一并退出**：针对 Windows Terminal / VS Code / conhost 控制台下的 Job Object 自动级联清理机制，改用 Win32 `CreateProcess` 注入 `CREATE_BREAKAWAY_FROM_JOB` 与 `DETACHED_PROCESS` 标志启动 DSH，彻底脱离控制台进程控制组及控制台句柄生命周期；用户随意关闭 CMD 窗口、关掉终端或退出均不会影响 DSH 独立运行。
+- **插件全量更新不可用**：原 `u all` 使用 `pnpm up --latest` 递归更新所有包，导致耗时数分钟并触发 supply-chain `ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION` 或依赖冲突；现改为精确筛选并针对待更新插件执行批量/逐项精确版本更新（`pnpm add <pkg>@<latest> --save-exact`），耗时从几分钟缩减至数秒且不破坏其它锁版本。
+- 备份目录增加 `pnpm-workspace.yaml`，防止 pnpm 策略配置丢失。
 
 **代码评审响应**（基于外部静态审查 + 本机实测）
 

@@ -36,6 +36,13 @@ function Warn($m) { Write-Host "  $m" -ForegroundColor Yellow }
 function Err($m)  { Write-Host "  $m" -ForegroundColor Red }
 function Dim($m)  { Write-Host "  $m" -ForegroundColor DarkGray }
 
+function Format-Count($num) {
+    if ($null -eq $num -or $num -le 0) { return "0" }
+    if ($num -ge 1000000) { return ("{0:N1}M" -f ($num / 1000000)) }
+    if ($num -ge 10000) { return ("{0:N1}k" -f ($num / 1000)) }
+    return ("{0:N0}" -f $num)
+}
+
 # ============ 基础 ============
 
 function Test-DshClosed {
@@ -342,8 +349,21 @@ function Do-SearchInstall($keyword) {
             $r = $results[$i]
             Write-Host ("  [{0,2}] {1,-40} {2,-10}" -f ($i + 1), $r.Npm, $r.Ver) -NoNewline
             if ($installedNames -contains $r.Npm) { Write-Host "  ★已装" -ForegroundColor Green } else { Write-Host "" }
+            
+            # 收藏数 (Stars) 与下载量 (Downloads)
+            $starStr = "★ " + (Format-Count $r.Stars)
+            $dlStr   = "↓ " + (Format-Count $r.Downloads)
+            Write-Host "       " -NoNewline
+            Write-Host $starStr -ForegroundColor Yellow -NoNewline
+            Write-Host "  " -NoNewline
+            Write-Host $dlStr -ForegroundColor Cyan -NoNewline
+            if ($r.Url) {
+                Write-Host "  $($r.Url)" -ForegroundColor DarkGray
+            } else {
+                Write-Host ""
+            }
+
             if ($r.Desc) { Write-Host ("       " + $r.Desc) -ForegroundColor DarkGray }
-            if ($r.Url) { Write-Host ("       " + $r.Url) -ForegroundColor DarkCyan }
         }
         Write-Host ""
 
@@ -752,6 +772,88 @@ function Save-DshExe($path) {
     Write-JsonNoBom $cfgFile @{ dshExe = $path }
 }
 
+if (-not ([System.Management.Automation.PSTypeName]'DshProcessLauncher').Type) {
+    $launcherCode = @'
+using System;
+using System.Runtime.InteropServices;
+
+public class DshProcessLauncher {
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    public static extern bool CreateProcess(
+        string lpApplicationName,
+        string lpCommandLine,
+        IntPtr lpProcessAttributes,
+        IntPtr lpThreadAttributes,
+        bool bInheritHandles,
+        uint dwCreationFlags,
+        IntPtr lpEnvironment,
+        string lpCurrentDirectory,
+        ref STARTUPINFO lpStartupInfo,
+        out PROCESS_INFORMATION lpProcessInformation
+    );
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool CloseHandle(IntPtr hObject);
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    public struct STARTUPINFO {
+        public uint cb;
+        public string lpReserved;
+        public string lpDesktop;
+        public string lpTitle;
+        public uint dwX;
+        public uint dwY;
+        public uint dwXSize;
+        public uint dwYSize;
+        public uint dwXCountChars;
+        public uint dwYCountChars;
+        public uint dwFillAttribute;
+        public uint dwFlags;
+        public short wShowWindow;
+        public short cbReserved2;
+        public IntPtr lpReserved2;
+        public IntPtr hStdInput;
+        public IntPtr hStdOutput;
+        public IntPtr hStdError;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct PROCESS_INFORMATION {
+        public IntPtr hProcess;
+        public IntPtr hThread;
+        public uint dwProcessId;
+        public uint dwThreadId;
+    }
+
+    public const uint CREATE_BREAKAWAY_FROM_JOB = 0x01000000;
+    public const uint DETACHED_PROCESS          = 0x00000008;
+    public const uint NORMAL_PRIORITY_CLASS     = 0x00000020;
+
+    public static uint StartDetached(string exePath, string workingDir) {
+        STARTUPINFO si = new STARTUPINFO();
+        si.cb = (uint)Marshal.SizeOf(typeof(STARTUPINFO));
+        PROCESS_INFORMATION pi = new PROCESS_INFORMATION();
+
+        string cmdLine = "\"" + exePath + "\"";
+        uint flags = CREATE_BREAKAWAY_FROM_JOB | DETACHED_PROCESS | NORMAL_PRIORITY_CLASS;
+        bool ok = CreateProcess(exePath, cmdLine, IntPtr.Zero, IntPtr.Zero, false, flags, IntPtr.Zero, workingDir, ref si, out pi);
+        if (!ok) {
+            flags = DETACHED_PROCESS | NORMAL_PRIORITY_CLASS;
+            ok = CreateProcess(exePath, cmdLine, IntPtr.Zero, IntPtr.Zero, false, flags, IntPtr.Zero, workingDir, ref si, out pi);
+        }
+
+        if (ok) {
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+            return pi.dwProcessId;
+        }
+        return 0;
+    }
+}
+'@
+    Add-Type -TypeDefinition $launcherCode -ErrorAction SilentlyContinue
+}
+
 function Start-Dsh {
     $running = Get-Process -Name "DeepSeek Harness" -ErrorAction SilentlyContinue
     if ($running) { Warn "DSH 已经在运行（$($running.Count) 个进程）。"; return }
@@ -770,15 +872,19 @@ function Start-Dsh {
 
     $workDir = Split-Path $exe -Parent
     try {
-        # 使用 Shell.Application 脱离当前控制台进程树，交由 Windows Explorer 托管启动。
-        # 避免关闭 cmd 控制台窗口或退出管理器时，系统向控制台进程树广播信号将 DSH 一并终止。
-        $sh = New-Object -ComObject Shell.Application
-        $sh.ShellExecute($exe, "", $workDir, "open", 1)
-        Ok "已启动：$exe"
-        Dim "启动需要几秒，插件加载完成后即可使用。"
+        # 优先使用 Win32 CreateProcess (CREATE_BREAKAWAY_FROM_JOB + DETACHED_PROCESS) 启动。
+        # 彻底脱离控制台 Session、控制台句柄继承及任何 Job Object（如 Windows Terminal / VS Code 终端控制组）。
+        # 无论关闭 CMD 窗口、按 q 退出管理器还是强杀终端，DSH 都不会受任何影响。
+        $procId = [DshProcessLauncher]::StartDetached($exe, $workDir)
+        if ($procId -gt 0) {
+            Ok "已启动：$exe"
+            Dim "启动需要几秒，插件加载完成后即可使用。"
+            return
+        }
+        throw "Win32 CreateProcess 启动失败"
     }
     catch {
-        # 兜底：若 COM 调用失败，回退到普通 Start-Process
+        # 兜底：若 P/Invoke 失败，回退到普通 Start-Process
         try {
             Start-Process -FilePath $exe -WorkingDirectory $workDir
             Ok "已启动：$exe"
@@ -849,6 +955,16 @@ function Show-PluginDetail($index) {
         foreach ($i in $cache.items) { if ($i.name -eq $p.Name) { $latest = $i.latest } }
     }
 
+    $stars = $null
+    $downloads = $null
+    $catLines = Get-CatalogLines $CacheDir
+    $catLine = ($catLines | Where-Object { $_ -like "$($p.Name)`t*" }) | Select-Object -First 1
+    if ($catLine) {
+        $cf = $catLine.Split("`t")
+        if ($cf.Count -gt 7) { [void][int]::TryParse($cf[7], [ref]$stars) }
+        if ($cf.Count -gt 8) { [void][int]::TryParse($cf[8], [ref]$downloads) }
+    }
+
     Write-Host ""
     Write-Host "  $($p.Name)" -ForegroundColor White -NoNewline
     Write-Host ("  " + $p.Version) -ForegroundColor Gray -NoNewline
@@ -857,6 +973,10 @@ function Show-PluginDetail($index) {
 
     if ($desc) { Write-Host "  描述  " -NoNewline; Write-Host $desc }
     if ($repo) { Write-Host "  仓库  " -NoNewline; Write-Host $repo -ForegroundColor Cyan }
+    if ($null -ne $stars -or $null -ne $downloads) {
+        Write-Host "  热度  " -NoNewline
+        Write-Host ("★ {0}   ↓ {1}" -f (Format-Count $stars), (Format-Count $downloads)) -ForegroundColor Yellow
+    }
 
     $dataPaths = Get-PluginDataPaths $p.Name
     if ($dataPaths.Count -gt 0) {

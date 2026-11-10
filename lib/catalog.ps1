@@ -3,7 +3,7 @@
 
 $script:CatalogUrl     = "https://awesome-dsh-plugin.com/plugins.json"
 $script:CatalogTtlDays = 7
-$script:IndexFormat    = 2   # 2 = 增加 url 列；格式变化时自动重建索引
+$script:IndexFormat    = 3   # 3 = 增加 stars, downloads 列；格式变化时自动重建索引
 
 function Get-CatalogPaths($cacheDir) {
     return @{
@@ -127,14 +127,21 @@ function Search-Catalog($lines, $keyword, $limit) {
             elseif ($f[2] -and $f[2].ToLower().IndexOf($t) -ge 0) { $score += 5 }
             else { $score += 1 }
         }
+        $stars = 0
+        $downloads = 0
+        if ($f.Count -gt 7) { [void][int]::TryParse($f[7], [ref]$stars) }
+        if ($f.Count -gt 8) { [void][int]::TryParse($f[8], [ref]$downloads) }
+
         [void]$hits.Add([pscustomobject]@{
-            Score = $score
-            Npm   = $npm
-            Ver   = $f[1]
-            Name  = $f[2]
-            Cat   = $f[3]
-            Desc  = $f[4]
-            Url   = $(if ($f.Count -gt 6) { $f[6] } else { "" })
+            Score     = $score
+            Npm       = $npm
+            Ver       = $f[1]
+            Name      = $f[2]
+            Cat       = $f[3]
+            Desc      = $f[4]
+            Url       = $(if ($f.Count -gt 6) { $f[6] } else { "" })
+            Stars     = $stars
+            Downloads = $downloads
         })
     }
 
