@@ -69,7 +69,7 @@ function Backup-Profile {
     $stamp = Get-Date -Format "yyyyMMdd-HHmmssfff"
     $dir = Join-Path $ProfileDir "_install-backup-$stamp"
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
-    foreach ($f in @("package.json", "pnpm-lock.yaml", "cordis.patch.yml")) {
+    foreach ($f in @("package.json", "pnpm-lock.yaml", "cordis.patch.yml", "pnpm-workspace.yaml")) {
         $src = Join-Path $ProfileDir $f
         if (Test-Path $src) { Copy-Item $src $dir -Force }
     }
@@ -391,25 +391,79 @@ function Update-One($index) {
 }
 
 function Update-All {
+    $items = @()
     $cache = Get-OutdatedCache
-    $count = 0
-    if ($cache) { $count = @($cache.items).Count }
-    if ($count -eq 0) {
+    if ($cache -and $cache.items) { $items = @($cache.items) }
+    if ($items.Count -eq 0) {
         Dim "先检查一次更新..."
         $fresh = Invoke-CheckUpdates
-        $count = @($fresh).Count
+        if ($fresh) { $items = @($fresh) }
     }
-    if ($count -eq 0) { Ok "没有可更新的插件。"; return }
+    if ($items.Count -eq 0) { Ok "没有可更新的插件。"; return }
 
-    Warn "即将更新 $count 个插件。更新后如不兼容可能导致启动异常（可用备份还原）。"
-    $ans = Read-Host "  确认？(y/N)"
+    # 交叉比对当前安装版本，过滤掉已是最新版的条目
+    $installed = Get-Installed
+    $installedMap = @{}
+    foreach ($p in $installed) { $installedMap[$p.Name] = $p.Version }
+
+    $toUpdate = @()
+    foreach ($it in $items) {
+        if ($installedMap.ContainsKey($it.name)) {
+            $cur = $installedMap[$it.name]
+            if ((Compare-Semver $it.latest $cur) -gt 0) {
+                $toUpdate += [pscustomobject]@{
+                    name    = $it.name
+                    current = $cur
+                    latest  = $it.latest
+                }
+            }
+        }
+    }
+    if ($toUpdate.Count -eq 0) {
+        Dim "缓存中的插件似乎已是最新，重新在线检查一次..."
+        $fresh = Invoke-CheckUpdates
+        if ($fresh) { $toUpdate = @($fresh) }
+    }
+    if ($toUpdate.Count -eq 0) { Ok "没有可更新的插件。"; return }
+
+    Write-Host ""
+    Warn "即将更新 $($toUpdate.Count) 个插件："
+    foreach ($it in $toUpdate) {
+        Dim ("  {0,-38} {1,-10} → {2}" -f $it.name, $it.current, $it.latest)
+    }
+    Dim "更新后如不兼容可能导致启动异常（可用备份还原）。"
+    $ans = Read-Host "  确认全部更新？(y/N)"
     if ($ans -ne "y" -and $ans -ne "Y") { return }
     if (-not (Test-DshClosed)) { return }
     [void](Backup-Profile)
-    Step "执行 pnpm up --latest"
-    $code = Invoke-Pnpm @("up", "--latest")
-    if ($code -ne 0) { Err "更新失败（exit=$code）"; return }
+
+    # 针对待更新插件执行精确版本更新（避免 pnpm up --latest 递归更新所有依赖引发依赖锁与策略冲突）
+    $specs = @($toUpdate | ForEach-Object { "$($_.name)@$($_.latest)" })
+    Step ("批量更新 {0} 个插件..." -f $toUpdate.Count)
+    $code = Invoke-Pnpm (@("add") + $specs + @("--save-exact"))
+    if ($code -ne 0) {
+        Warn "批量更新命令返回 exit=$code，尝试逐个插件更新..."
+        $failedList = @()
+        $successCount = 0
+        foreach ($it in $toUpdate) {
+            Step "更新 $($it.name)  $($it.current) → $($it.latest)"
+            $subCode = Invoke-Pnpm @("add", "$($it.name)@$($it.latest)", "--save-exact")
+            if ($subCode -ne 0) {
+                Err "$($it.name) 更新失败（exit=$subCode）"
+                $failedList += $it.name
+            } else {
+                $successCount++
+            }
+        }
+        if ($successCount -eq 0) {
+            Err "所有插件更新均失败。"
+            return
+        } elseif ($failedList.Count -gt 0) {
+            Warn "部分插件更新失败（$($failedList.Count) 个）：$($failedList -join ', ')"
+        }
+    }
     Repair-Electron
+    Clear-OutdatedCache
     [void](Invoke-CheckUpdates)
     Ok "更新完成。"
 }
@@ -714,12 +768,24 @@ function Start-Dsh {
         Dim "已记住该路径，下次自动使用。"
     }
 
+    $workDir = Split-Path $exe -Parent
     try {
-        Start-Process -FilePath $exe -WorkingDirectory (Split-Path $exe -Parent)
+        # 使用 Shell.Application 脱离当前控制台进程树，交由 Windows Explorer 托管启动。
+        # 避免关闭 cmd 控制台窗口或退出管理器时，系统向控制台进程树广播信号将 DSH 一并终止。
+        $sh = New-Object -ComObject Shell.Application
+        $sh.ShellExecute($exe, "", $workDir, "open", 1)
         Ok "已启动：$exe"
         Dim "启动需要几秒，插件加载完成后即可使用。"
     }
-    catch { Err "启动失败：$($_.Exception.Message)" }
+    catch {
+        # 兜底：若 COM 调用失败，回退到普通 Start-Process
+        try {
+            Start-Process -FilePath $exe -WorkingDirectory $workDir
+            Ok "已启动：$exe"
+            Dim "启动需要几秒，插件加载完成后即可使用。"
+        }
+        catch { Err "启动失败：$($_.Exception.Message)" }
+    }
 }
 
 # ============ 详情 + 操作（合并） ============

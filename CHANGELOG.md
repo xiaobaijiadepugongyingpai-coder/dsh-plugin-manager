@@ -1,6 +1,11 @@
 # 更新日志
 
-## v2.3 — 2026-11-08
+## v2.4 — 2026-11-10
+
+修复：
+- **插件全量更新不可用**：原 `u all` 使用 `pnpm up --latest` 递归更新所有包，导致耗时数分钟并触发 supply-chain `ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION` 或依赖冲突；现改为精确筛选并针对待更新插件执行批量/逐项精确版本更新（`pnpm add <pkg>@<latest> --save-exact`），耗时从几分钟缩减至数秒且不破坏其它锁版本
+- **`start` 启动 DSH 后关闭命令窗口导致 DSH 一并退出**：原通过 `Start-Process` 作为控制台子进程启动，关闭控制台窗口时控制台进程树广播关闭信号终止 DSH；现改用 Windows Explorer COM（`Shell.Application.ShellExecute`）托管启动，彻底脱离控制台进程生命周期
+- 备份目录增加 `pnpm-workspace.yaml`，防止 pnpm 策略配置丢失
 
 **代码评审响应**（基于外部静态审查 + 本机实测）
 
